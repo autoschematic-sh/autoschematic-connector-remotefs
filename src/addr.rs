@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use autoschematic_core::connector::ResourceAddress;
+use autoschematic_core::{connector::ResourceAddress, error_util::{invalid_addr, invalid_addr_path}};
 
 
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ impl ResourceAddress for RemoteFsPath {
             .join(path)
     }
 
-    fn from_path(path: &Path) -> Result<Option<Self>, anyhow::Error> {
+    fn from_path(path: &Path) -> Result<Self, anyhow::Error> {
         let path = if path.is_absolute() {
             path.strip_prefix("/").unwrap()
         } else {
@@ -32,7 +32,6 @@ impl ResourceAddress for RemoteFsPath {
 
         let path_components: Vec<&str> = path
             .components()
-            .into_iter()
             .map(|s| s.as_os_str().to_str().unwrap())
             .collect();
 
@@ -43,12 +42,12 @@ impl ResourceAddress for RemoteFsPath {
             ["remotefs", hostname, ..] => {
                 let prefix = PathBuf::from("remotefs").join(hostname);
                 let local_path = path.strip_prefix(prefix)?;
-                Ok(Some(RemoteFsPath {
+                Ok(RemoteFsPath {
                     hostname: hostname.to_string(),
                     path: local_path.to_path_buf(),
-                }))
+                })
             }
-            _ => Ok(None),
+            _ => Err(invalid_addr_path(path))
         }
     }
 }
