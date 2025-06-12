@@ -1,14 +1,13 @@
 use std::{
-    ffi::{OsStr, OsString},
-    os::unix::ffi::OsStringExt,
+    default,
     path::{Path, PathBuf},
 };
 
 use anyhow::{Context, bail};
 use autoschematic_core::{
     connector::{
-        Connector, ConnectorOp, ConnectorOutbox, GetResourceOutput, OpExecOutput, OpPlanOutput,
-        Resource, ResourceAddress,
+        Connector, ConnectorOp, ConnectorOutbox, FilterOutput, GetResourceOutput, OpExecOutput, OpPlanOutput, Resource,
+        ResourceAddress,
     },
     connector_op,
     diag::DiagnosticOutput,
@@ -68,10 +67,11 @@ impl SshKeyStorage for ConnectorSshKeyStorage {
     }
 }
 
+#[derive(Default)]
 pub struct RemoteFsConnector {
     // client: ScpFs,
     client_cache: DashMap<String, Arc<Mutex<ScpFs>>>,
-    config: RemoteFsConfig,
+    config: Mutex<RemoteFsConfig>,
     prefix: PathBuf,
 }
 
@@ -96,19 +96,19 @@ impl ConnectorOp for RemoteFsConnectorOp {
 }
 
 impl RemoteFsConnector {
-    fn get_client(&self, hostname: &str) -> Result<Arc<Mutex<ScpFs>>, anyhow::Error> {
+    async fn get_client(&self, hostname: &str) -> Result<Arc<Mutex<ScpFs>>, anyhow::Error> {
         if self.client_cache.contains_key(hostname) {
             let client = self.client_cache.get(hostname).unwrap();
             Ok(client.clone())
         } else {
-            let Some(host_config) = &self.config.hosts.get(hostname) else {
+            let config = self.config.lock().await;
+            let Some(host_config) = &config.hosts.get(hostname) else {
                 bail!("Host {} not in config", hostname);
             };
 
             let mut sshopts = SshOpts::new(hostname);
             if let Some(ssh_config_path) = &host_config.ssh_config_path {
-                sshopts = sshopts
-                    .config_file(ssh_config_path, remotefs_ssh::SshConfigParseRule::empty());
+                sshopts = sshopts.config_file(ssh_config_path, remotefs_ssh::SshConfigParseRule::empty());
             }
 
             sshopts = sshopts
@@ -122,8 +122,7 @@ impl RemoteFsConnector {
 
             client.connect()?;
 
-            self.client_cache
-                .insert(hostname.to_string(), Arc::new(Mutex::new(client)));
+            self.client_cache.insert(hostname.to_string(), Arc::new(Mutex::new(client)));
 
             let client = self.client_cache.get(hostname).unwrap();
             Ok(client.clone())
@@ -175,11 +174,7 @@ impl RemoteFsConnector {
         Ok(results)
     }
 
-    fn remote_file_exists(
-        client: &mut ScpFs,
-        path: &Path,
-        globs: &Option<Vec<String>>,
-    ) -> Result<bool, anyhow::Error> {
+    fn remote_file_exists(client: &mut ScpFs, path: &Path, globs: &Option<Vec<String>>) -> Result<bool, anyhow::Error> {
         eprintln!("remote_file_exists: {:?}", path);
 
         Ok(client.exists(path)?)
@@ -188,46 +183,50 @@ impl RemoteFsConnector {
 
 #[async_trait]
 impl Connector for RemoteFsConnector {
-    async fn new(
-        name: &str,
-        prefix: &Path,
-        outbox: ConnectorOutbox,
-    ) -> Result<Box<dyn Connector>, anyhow::Error>
+    async fn new(name: &str, prefix: &Path, outbox: ConnectorOutbox) -> Result<Box<dyn Connector>, anyhow::Error>
     where
         Self: Sized,
     {
-        let cfg_path = prefix.to_path_buf().join("remotefs/config.ron");
+        Ok(Box::new(RemoteFsConnector {
+            prefix: prefix.to_path_buf(),
+            ..Default::default()
+        }))
+    }
+
+    async fn init(&self) -> anyhow::Result<()> {
+        let cfg_path = self.prefix.to_path_buf().join("remotefs/config.ron");
 
         let cfg_body = if cfg_path.is_file() {
             std::fs::read_to_string(cfg_path)?
         } else {
-            bail!(
-                "RemoteFs connector config not found! Tried looking in {:?}",
-                cfg_path
-            );
+            bail!("RemoteFs connector config not found! Tried looking in {:?}", cfg_path);
         };
 
         let config = RON.from_str(&cfg_body)?;
 
-        Ok(Box::new(RemoteFsConnector {
-            client_cache: DashMap::new(),
-            config,
-            prefix: prefix.to_path_buf(),
-        }))
+        self.client_cache.clear();
+        *self.config.lock().await = config;
+
+        Ok(())
     }
 
-    async fn filter(&self, addr: &Path) -> Result<bool, anyhow::Error> {
+    async fn filter(&self, addr: &Path) -> Result<FilterOutput, anyhow::Error> {
         let addr = RemoteFsPath::from_path(addr);
+        // Alert! Alert!
+        // Look at this? filter() isn't a static function anymore!
+        // The only solution is to clear connector_cache.filter_cache when we reinit!
+        let config = self.config.lock().await;
+
         match addr {
             Ok(addr) => {
-                if self.config.hosts.contains_key(&addr.hostname) {
-                    return Ok(true);
+                if config.hosts.contains_key(&addr.hostname) {
+                    return Ok(FilterOutput::Resource);
                 } else {
-                    return Ok(false);
+                    return Ok(FilterOutput::None);
                 }
             }
             _ => {
-                return Ok(false);
+                return Ok(FilterOutput::None);
             }
         }
     }
@@ -235,19 +234,20 @@ impl Connector for RemoteFsConnector {
     async fn list(&self, subpath: &Path) -> Result<Vec<PathBuf>, anyhow::Error> {
         // let hostnames: Vec<String> = self.config.keys().map(|h| h.clone()).collect_vec();
 
+        let config = self.config.lock().await;
+
         let mut results: Vec<PathBuf> = Vec::new();
-        for hostname in self.config.hosts.keys() {
-            let Some(host) = &self.config.hosts.get(hostname) else {
+        for hostname in config.hosts.keys() {
+            let Some(host) = &config.hosts.get(hostname) else {
                 continue;
             };
-            let client = self.get_client(hostname)?;
+            let client = self.get_client(hostname).await?;
             let client = &mut *client.lock().await;
 
             for mount in &host.mounts {
                 if let Some(ref dirs) = mount.dirs {
                     for dir in dirs {
-                        let listing =
-                            RemoteFsConnector::list_recursive(client, dir, &mount.globs)?;
+                        let listing = RemoteFsConnector::list_recursive(client, dir, &mount.globs)?;
                         for file in listing {
                             let path = if file.path.is_absolute() {
                                 file.path.strip_prefix("/").unwrap()
@@ -277,7 +277,7 @@ impl Connector for RemoteFsConnector {
         let remote_path = PathBuf::from("/").join(&addr.path);
         eprintln!("GET: {:?} -> {:?}", &addr.path, &remote_path);
         // self.client.remove_file(&remote_path)?;
-        let client = self.get_client(&addr.hostname)?;
+        let client = self.get_client(&addr.hostname).await?;
         let client = &mut *client.lock().await;
         if client.exists(&remote_path)? {
             let mut read_stream = client.open(&remote_path)?;
@@ -285,9 +285,7 @@ impl Connector for RemoteFsConnector {
             eprintln!("GET: starting");
             read_stream.read_to_end(&mut body).context("read_to_end")?;
             eprintln!("GET: len {}", body.len());
-            get_resource_output!(FileContents {
-                contents: OsString::from_vec(body)
-            })
+            get_resource_output!(FileContents { contents: body })
         } else {
             Ok(None)
         }
@@ -296,14 +294,16 @@ impl Connector for RemoteFsConnector {
     async fn plan(
         &self,
         addr: &Path,
-        current: Option<OsString>,
-        desired: Option<OsString>,
+        current: Option<Vec<u8>>,
+        desired: Option<Vec<u8>>,
     ) -> Result<Vec<OpPlanOutput>, anyhow::Error> {
+        let config = self.config.lock().await;
+
         tracing::info!("plan {:?} -? {:?}", current, desired);
         let addr = RemoteFsPath::from_path(addr)?;
 
         let remote_path = PathBuf::from("/").join(&addr.path);
-        let Some(host) = self.config.hosts.get(&addr.hostname) else {
+        let Some(host) = config.hosts.get(&addr.hostname) else {
             return Ok(Vec::new());
         };
 
@@ -333,30 +333,18 @@ impl Connector for RemoteFsConnector {
 
                 res.push(connector_op!(
                     RemoteFsConnectorOp::Delete,
-                    format!(
-                        "Delete remote file at {}/{}",
-                        addr.hostname,
-                        addr.path.to_string_lossy()
-                    )
+                    format!("Delete remote file at {}/{}", addr.hostname, addr.path.to_string_lossy())
                 ));
             }
             (Some(_), Some(_)) => res.push(connector_op!(
                 RemoteFsConnectorOp::Copy,
-                format!(
-                    "Modify remote file at {}/{}",
-                    addr.hostname,
-                    addr.path.to_string_lossy()
-                )
+                format!("Modify remote file at {}/{}", addr.hostname, addr.path.to_string_lossy())
             )),
             (None, Some(_)) => {
                 //RemoteFs push
                 res.push(connector_op!(
                     RemoteFsConnectorOp::Copy,
-                    format!(
-                        "Create new remote file at {}/{}",
-                        addr.hostname,
-                        addr.path.to_string_lossy()
-                    )
+                    format!("Create new remote file at {}/{}", addr.hostname, addr.path.to_string_lossy())
                 ));
             }
         }
@@ -375,6 +363,8 @@ impl Connector for RemoteFsConnector {
         let op = RemoteFsConnectorOp::from_str(op)?;
         let addr = RemoteFsPath::from_path(addr)?;
 
+        let config = self.config.lock().await;
+
         match op {
             RemoteFsConnectorOp::Copy => {
                 // let size: u64 = contents.contents.len().try_into()?;
@@ -390,11 +380,11 @@ impl Connector for RemoteFsConnector {
                 eprintln!("COPY: {:?} -> {:?}", &local_path, &remote_path);
                 eprintln!("COPY: pwd = {:?}", &std::env::current_dir()?);
                 // self.client.copy(&addr.path, &remote_path)?;
-                let client = self.get_client(&addr.hostname)?;
+                let client = self.get_client(&addr.hostname).await?;
                 let client = &mut *client.lock().await;
                 // println!("COPY: pwd = {:?}", client.pwd()?);
 
-                let Some(host) = self.config.hosts.get(&addr.hostname) else {
+                let Some(host) = config.hosts.get(&addr.hostname) else {
                     bail!("Host {} not in config", addr.hostname);
                 };
                 let mounts = &host.mounts;
@@ -452,11 +442,11 @@ impl Connector for RemoteFsConnector {
             }
             RemoteFsConnectorOp::Delete => {
                 let remote_path = PathBuf::from("/").join(&addr.path);
-                // println!("DELETE: {:?} -> {:?}", &addr.path, &remote_path);
-                // self.client.remove_file(&remote_path)?;
-                let client = self.get_client(&addr.hostname)?;
+                let client = self.get_client(&addr.hostname).await?;
                 let client = &mut *client.lock().await;
+
                 client.remove_file(&remote_path)?;
+
                 return op_exec_output!(format!(
                     "Deleted remote file at {}/{}",
                     addr.hostname,
@@ -464,7 +454,7 @@ impl Connector for RemoteFsConnector {
                 ));
             }
             RemoteFsConnectorOp::Exec(hook) => {
-                let client = self.get_client(&addr.hostname)?;
+                let client = self.get_client(&addr.hostname).await?;
                 let client = &mut *client.lock().await;
 
                 if let Some(work_dir) = hook.work_dir {
@@ -481,17 +471,15 @@ impl Connector for RemoteFsConnector {
         }
     }
 
-    async fn eq(&self, addr: &Path, a: &OsStr, b: &OsStr) -> Result<bool, anyhow::Error> {
+    async fn eq(&self, addr: &Path, a: &[u8], b: &[u8]) -> Result<bool, anyhow::Error> {
         Ok(a == b)
     }
 
-    async fn diag(&self, addr: &Path, a: &OsStr) -> Result<DiagnosticOutput, anyhow::Error> {
+    async fn diag(&self, addr: &Path, a: &[u8]) -> Result<DiagnosticOutput, anyhow::Error> {
         if addr == PathBuf::from("remotefs/config.ron") {
             ron_check_syntax::<RemoteFsHost>(a)
         } else {
-            Ok(DiagnosticOutput {
-                diagnostics: Vec::new(),
-            })
+            Ok(DiagnosticOutput { diagnostics: Vec::new() })
         }
     }
 }

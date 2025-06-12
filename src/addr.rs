@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
-use autoschematic_core::{connector::ResourceAddress, error_util::{invalid_addr, invalid_addr_path}};
-
+use autoschematic_core::{
+    connector::ResourceAddress,
+    error_util::{invalid_addr, invalid_addr_path},
+};
 
 #[derive(Debug, Clone)]
 pub struct RemoteFsPath {
     pub hostname: String,
-    pub path: PathBuf,
+    pub path:     PathBuf,
 }
 
 impl ResourceAddress for RemoteFsPath {
@@ -18,9 +20,7 @@ impl ResourceAddress for RemoteFsPath {
         } else {
             &self.path
         };
-        PathBuf::from("remotefs")
-            .join(self.hostname.clone())
-            .join(path)
+        PathBuf::from("remotefs").join(self.hostname.clone()).join(path)
     }
 
     fn from_path(path: &Path) -> Result<Self, anyhow::Error> {
@@ -30,11 +30,7 @@ impl ResourceAddress for RemoteFsPath {
             path
         };
 
-        let path_components: Vec<&str> = path
-            .components()
-            .map(|s| s.as_os_str().to_str().unwrap())
-            .collect();
-
+        let path_components: Vec<&str> = path.components().map(|s| s.as_os_str().to_str().unwrap()).collect();
 
         // path = "./remotefs/psychlone.xyz/etc/crontab"
         // local_path = "./etc/crontab"
@@ -44,10 +40,10 @@ impl ResourceAddress for RemoteFsPath {
                 let local_path = path.strip_prefix(prefix)?;
                 Ok(RemoteFsPath {
                     hostname: hostname.to_string(),
-                    path: local_path.to_path_buf(),
+                    path:     local_path.to_path_buf(),
                 })
             }
-            _ => Err(invalid_addr_path(path))
+            _ => Err(invalid_addr_path(path)),
         }
     }
 }

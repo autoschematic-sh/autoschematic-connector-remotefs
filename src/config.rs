@@ -67,7 +67,7 @@ pub struct RemoteFsHost {
     pub ssh_config_path: Option<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteFsConfig {
     pub hosts: HashMap<String, RemoteFsHost>,

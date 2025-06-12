@@ -1,13 +1,13 @@
 [package]
 name = "autoschematic-connector-remotefs"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 
 [dependencies]
 tokio = { version = "1.45.0", features = ["rt-multi-thread"] }
 anyhow = "1.0.95"
 async-trait = "0.1.86"
-autoschematic-core = { path = "../../autoschematic/autoschematic-core", version = "0.4.0"}
+autoschematic-core = { path = "../../autoschematic/autoschematic-core", version = "0.5.0" }
 ron = { version = "0.10.1", features = ["indexmap"] }
 serde = { version = "1.0.217", features = ["derive"] }
 thiserror = "2.0.11"
