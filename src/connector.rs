@@ -183,11 +183,11 @@ impl RemoteFsConnector {
 
 #[async_trait]
 impl Connector for RemoteFsConnector {
-    async fn new(name: &str, prefix: &Path, outbox: ConnectorOutbox) -> Result<Box<dyn Connector>, anyhow::Error>
+    async fn new(name: &str, prefix: &Path, outbox: ConnectorOutbox) -> Result<Arc<dyn Connector>, anyhow::Error>
     where
         Self: Sized,
     {
-        Ok(Box::new(RemoteFsConnector {
+        Ok(Arc::new(RemoteFsConnector {
             prefix: prefix.to_path_buf(),
             ..Default::default()
         }))
@@ -234,7 +234,7 @@ impl Connector for RemoteFsConnector {
     async fn list(&self, subpath: &Path) -> Result<Vec<PathBuf>, anyhow::Error> {
         // let hostnames: Vec<String> = self.config.keys().map(|h| h.clone()).collect_vec();
 
-        let config = self.config.lock().await;
+        let config = self.config.lock().await.clone();
 
         let mut results: Vec<PathBuf> = Vec::new();
         for hostname in config.hosts.keys() {
@@ -261,7 +261,12 @@ impl Connector for RemoteFsConnector {
                 if let Some(ref files) = mount.files {
                     for file in files {
                         if RemoteFsConnector::remote_file_exists(client, file, &mount.globs)? {
-                            results.push(PathBuf::from("remotefs").join(hostname).join(file));
+                            let path = if file.is_absolute() {
+                                file.strip_prefix("/").unwrap()
+                            } else {
+                                &file
+                            };
+                            results.push(PathBuf::from("remotefs").join(hostname).join(path));
                         }
                     }
                 }

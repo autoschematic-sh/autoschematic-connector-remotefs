@@ -5,7 +5,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Debug, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 /// A RemoteFsMount represents a set of files to
 /// sync to/from a remote server on the host
