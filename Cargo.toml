@@ -1,5 +1,7 @@
 [package]
 name = "autoschematic-connector-remotefs"
+description = "An Autoschematic connector for declaratively managing remote files over SSH."
+license = "MIT"
 version = "0.6.1"
 edition = "2024"
 
