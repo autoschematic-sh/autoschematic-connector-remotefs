@@ -4,6 +4,9 @@ description = "An Autoschematic connector for declaratively managing remote file
 license = "MIT"
 version = "0.12.0"
 edition = "2024"
+authors = ["Peter Sherman <peter@autoschematic.sh>"]
+repository = "https://github.com/autoschematic-sh/autoschematic-connector-remotefs"
+homepage = "https://autoschematic.sh"
 
 
 [dependencies]
