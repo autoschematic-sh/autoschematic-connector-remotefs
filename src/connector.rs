@@ -6,12 +6,12 @@ use std::{
 use anyhow::{Context, bail};
 use autoschematic_core::{
     connector::{
-        Connector, ConnectorOp, ConnectorOutbox, FilterResponse, GetResourceResponse, OpExecResponse, PlanResponseElement,
-        Resource, ResourceAddress,
+        Connector, ConnectorOp, ConnectorOutbox, DocIdent, FilterResponse, GetDocResponse, GetResourceResponse, OpExecResponse,
+        PlanResponseElement, Resource, ResourceAddress,
     },
     connector_op,
     diag::DiagnosticResponse,
-    get_resource_response, op_exec_output,
+    doc_dispatch, get_resource_response, op_exec_output,
     util::{RON, ron_check_syntax},
 };
 use tokio::sync::Mutex;
@@ -35,7 +35,7 @@ use tempfile::NamedTempFile;
 
 use crate::{
     addr::RemoteFsPath,
-    config::{RemoteFsConfig, RemoteFsHook, RemoteFsHost},
+    config::{RemoteFsConfig, RemoteFsHook, RemoteFsHost, RemoteFsMount},
     resource::FileContents,
 };
 
@@ -210,6 +210,10 @@ impl Connector for RemoteFsConnector {
     }
 
     async fn filter(&self, addr: &Path) -> Result<FilterResponse, anyhow::Error> {
+        if addr == "remotefs/config.ron" {
+            return Ok(FilterResponse::Config);
+        }
+
         let addr = RemoteFsPath::from_path(addr);
         // Alert! Alert!
         // Look at this? filter() isn't a static function anymore!
@@ -285,9 +289,9 @@ impl Connector for RemoteFsConnector {
         if client.exists(&remote_path)? {
             let mut read_stream = client.open(&remote_path)?;
             let mut body: Vec<u8> = Vec::new();
-            eprintln!("GET: starting");
+            tracing::debug!("GET: starting");
             read_stream.read_to_end(&mut body).context("read_to_end")?;
-            eprintln!("GET: len {}", body.len());
+            tracing::debug!("GET: len {}", body.len());
             get_resource_response!(FileContents { contents: body })
         } else {
             Ok(None)
@@ -457,16 +461,26 @@ impl Connector for RemoteFsConnector {
                 let client = self.get_client(&addr.hostname).await?;
                 let client = &mut *client.lock().await;
 
+                let res; // = (0, String::new());
+
                 if let Some(work_dir) = hook.work_dir {
                     let old_workdir = client.pwd()?;
                     client.change_dir(&work_dir)?;
-                    client.exec(&hook.shell)?;
+
+                    res = client.exec(&hook.shell)?;
+                    eprintln!("{}", res.1);
+
                     client.change_dir(&old_workdir)?;
                 } else {
-                    client.exec(&hook.shell)?;
+                    res = client.exec(&hook.shell)?;
+                    eprintln!("{}", res.1);
                 }
 
-                return op_exec_output!(format!("Executed hook"));
+                if !hook.ignore_error && res.0 != 0 {
+                    bail!("Hook exited with an error (res = {})\n(Set `ignore_error: true` in the RemoteFsHook to ignore this in the future and proceed automatically)", res.0);
+                }
+
+                return op_exec_output!(format!("Executed hook (res = {})", res.0));
             }
         }
     }
@@ -477,7 +491,15 @@ impl Connector for RemoteFsConnector {
 
     async fn diag(&self, addr: &Path, a: &[u8]) -> Result<Option<DiagnosticResponse>, anyhow::Error> {
         if addr == PathBuf::from("remotefs/config.ron") {
-            ron_check_syntax::<RemoteFsHost>(a)
+            ron_check_syntax::<RemoteFsConfig>(a)
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn get_docstring(&self, addr: &Path, ident: DocIdent) -> anyhow::Result<Option<GetDocResponse>> {
+        if addr == PathBuf::from("remotefs/config.ron") {
+            doc_dispatch!(ident, [RemoteFsConfig, RemoteFsHook, RemoteFsHost, RemoteFsMount])
         } else {
             Ok(None)
         }
